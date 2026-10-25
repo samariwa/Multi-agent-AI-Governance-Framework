@@ -1,0 +1,75 @@
+# Access policy — the single source of truth. Read ONLY by the broker.
+#
+# Effective permission for any request = agent scope ∩ acting user's rights.
+# Anything not explicitly listed here is denied.
+
+agents:
+  assistant-agent:
+    actions: [read]            # no writes at all — write attempts are denied by agent scope
+    tables:
+      tickets:   [id, subject, status, created_at, customer_name]
+      employees: [id, name, department, salary]   # agent CAN read salary; users may not
+      # Not in scope at all: tickets.internal_notes, employees.bank_account
+    # Adaptive mode: the assistant may hand parts of a task to specialists.
+    may_delegate_to: [ticket-analyst, hr-analyst]    # NOT payroll-agent
+    delegable:                       # ceiling on anything passed down the chain
+      actions: [read]
+      tables:
+        tickets:   [id, subject, status, created_at]        # customer names are never delegated
+        employees: [id, name, department, salary]
+
+  # --- Agent team (multi-agent mode) -------------------------------------
+  # The orchestrator never touches data itself. It can only hand work to
+  # specialist sub-agents, and the broker decides every handoff.
+  orchestrator:
+    actions: [read]
+    tables: {}                       # no direct data access at all
+    may_delegate_to: [ticket-analyst, hr-analyst]   # NOT payroll-agent
+    delegable:                       # ceiling on anything passed down the chain
+      actions: [read]
+      tables:
+        tickets:   [id, subject, status, created_at]        # customer names are never delegated
+        employees: [id, name, department, salary]
+
+  # Sub-agents can only act via a delegated token (no tokens of their own).
+  # Effective permission for a delegated request =
+  #   sub-agent scope ∩ every delegator's ceiling ∩ the acting user's rights.
+  ticket-analyst:
+    delegated_only: true
+    actions: [read]
+    tables:
+      tickets: [id, subject, status, created_at, customer_name]   # customer_name is cut by the orchestrator's ceiling
+
+  hr-analyst:
+    delegated_only: true
+    actions: [read]
+    tables:
+      employees: [id, name, department, salary]
+
+  payroll-agent:                     # reserved for the payroll system; nothing here may delegate to it
+    delegated_only: true
+    actions: [read]
+    tables:
+      employees: [id, name, bank_account]
+
+users:
+  alice:                       # HR manager
+    may_read:
+      employees: [id, name, department, salary]
+      tickets:   [id, subject, status, created_at, customer_name]
+
+  bob:                         # support analyst
+    may_read:
+      tickets:   [id, subject, status, created_at, customer_name]
+      # no employees access at all
+
+  carol:                       # contractor: read-only tickets, no customer names, small result sets
+    may_read:
+      tickets:   [id, subject, status, created_at]
+    max_rows: 5
+
+# Hard ceiling on rows returned for any single request, regardless of user.
+limits:
+  max_rows: 100
+  max_delegation_depth: 2          # orchestrator → sub-agent; sub-agents cannot re-delegate further
+  delegated_token_ttl_seconds: 300

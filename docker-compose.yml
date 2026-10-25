@@ -1,0 +1,88 @@
+# Two networks form the security boundary:
+#   backend  — db + broker only (internal: no route in or out except via broker)
+#   frontend — broker + agent + ui
+# The broker is the only service on both. The agent has no path to the db.
+
+name: ai-governance-sim
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    networks: [backend]
+    # No published ports: the database is unreachable from the host and the agent.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  broker:
+    build: ./broker
+    environment:
+      DB_HOST: db
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      BROKER_SIGNING_SECRET: ${BROKER_SIGNING_SECRET}
+      TOKEN_TTL_SECONDS: ${TOKEN_TTL_SECONDS:-900}
+      AGENT_CLIENT_SECRETS: assistant-agent=${AGENT_CLIENT_SECRET},orchestrator=${ORCHESTRATOR_CLIENT_SECRET}
+      POLICY_PATH: /policy/policy.yaml
+      AUDIT_LOG_PATH: /var/log/broker/audit.jsonl
+    volumes:
+      - ./policy:/policy:ro
+      - audit:/var/log/broker
+    networks: [backend, frontend]
+    ports:
+      - "127.0.0.1:8001:8000"   # for the test suite / operator; loopback only
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  agent:
+    build: ./agent
+    # Deliberately NO database settings here.
+    environment:
+      BROKER_URL: http://broker:8000
+      AGENT_ID: assistant-agent
+      AGENT_CLIENT_SECRET: ${AGENT_CLIENT_SECRET}
+      ORCHESTRATOR_CLIENT_SECRET: ${ORCHESTRATOR_CLIENT_SECRET}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_SUBAGENT_MODEL: ${LLM_SUBAGENT_MODEL:-}
+      OPENAI_REASONING_EFFORT: ${OPENAI_REASONING_EFFORT:-low}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_REASONING: ${OLLAMA_REASONING:-true}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # reach a local Ollama on the host (Linux too)
+    networks: [frontend]
+    depends_on:
+      broker:
+        condition: service_healthy
+
+  ui:
+    build: ./ui
+    ports:
+      - "127.0.0.1:8080:80"
+    networks: [frontend]
+    depends_on: [agent]
+
+networks:
+  backend:
+    internal: true
+  frontend: {}
+
+volumes:
+  audit:
